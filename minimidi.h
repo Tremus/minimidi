@@ -50,6 +50,25 @@ void minimidi_disconnect_port(MiniMIDI* mm);
 #define MINIMIDI_MIDI_BUFFER_COUNT 4
 #define MINIMIDI_MIDI_BUFFER_SIZE 1024
 
+static unsigned minimidi_calc_bytes_from_status(unsigned char status_byte)
+{
+    /* https://www.midi.org/specifications-old/item/table-2-expanded-messages-list-status-bytes  */
+    /* https://www.midi.org/specifications-old/item/table-3-control-change-messages-data-bytes-2 */
+    /* https://www.recordingblogs.com/wiki/midi-quarter-frame-message */
+    switch (status_byte)
+    {
+    case 0x80 ... 0xbf:
+    case 0xe0 ... 0xef:
+    case 0xf2:
+        return 3;
+    case 0xc0 ... 0xdf:
+    case 0xf1:
+        return 2;
+    default:
+        return 1;
+    }
+}
+
 #ifdef __APPLE__
 #include <CoreMIDI/CoreMIDI.h>
 
@@ -245,20 +264,26 @@ int minimidi_get_port_name(MiniMIDI* mm, unsigned int portNumber, char* nameBuff
     return result;
 }
 
+/* wMsg: message type
+ * midiMessage: midi status byte followed by up to 2 data bytes. The remaining bytes are junk.
+ * timeMs: represents the time in milliseconds since the port connected
+ */
 void CALLBACK
-minimidi_MidiInProc(HMIDIIN hMidiIn, UINT wMsg, DWORD_PTR dwInstance, DWORD_PTR dwParam1, DWORD_PTR dwParam2)
+minimidi_MidiInProc(HMIDIIN hMidiIn, UINT wMsg, DWORD_PTR dwInstance, DWORD_PTR midiMessage, DWORD_PTR timeMs)
 {
     MiniMIDI* mm = (MiniMIDI*)dwInstance;
-    printf("Midi: %u\n", wMsg);
 
     /* https://learn.microsoft.com/en-gb/windows/win32/multimedia/mim-data?redirectedfrom=MSDN */
     if (wMsg == MIM_DATA)
     {
-        UCHAR status = wMsg & 0xff;
+        /* take first 3 bytes. remember, the rest are junk, including possibly the ones we're taking */
+        UINT  bytes = midiMessage & 0xffffff;
+        /* TODO push midi bytes & timestamp to a ring buffer */
     }
     else if (wMsg == MIM_LONGDATA)
     {
         /* handle sysex*/
+        /* https://www.midi.org/specifications-old/item/table-4-universal-system-exclusive-messages */
     }
 
     return;
