@@ -10,7 +10,6 @@
  *
  * #define MINIMIDI_MALLOC & MINIMIDI_FREE to use your own allocator
  * #define MINIMIDI_ASSERT to use your own assert
- *
  */
 
 #ifdef __cplusplus
