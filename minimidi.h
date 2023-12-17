@@ -1,10 +1,16 @@
 /* MINIMIDI
  * STB style header library.
- * Simply #define MINIMIDI_IMPL once in your project to get the OS specific implementation
+ * Only handles MIDI input on Windows & MacOS, skipping SYSEX messages.
  *
  * DOCS:
- * Set #define MINIMIDI_USE_GLOBAL to add a static global MiniMIDI in the implementation.
+ * #define MINIMIDI_IMPL once in your project to get the OS specific implementation
+ *
+ * #define MINIMIDI_USE_GLOBAL to add a static global MiniMIDI in the implementation.
  * You can access this object by calling minimidi_get_global();
+ *
+ * #define MINIMIDI_MALLOC & MINIMIDI_FREE to use your own allocator
+ * #define MINIMIDI_ASSERT to use your own assert
+ *
  */
 
 #ifdef __cplusplus
@@ -71,6 +77,17 @@ unsigned minimidi_calc_num_bytes_from_status(unsigned char status_byte);
 #define MINIMIDI_MIDI_BUFFER_COUNT 4
 #define MINIMIDI_MIDI_BUFFER_SIZE 1024
 
+#ifndef MINIMIDI_MALLOC
+#include <stdlib.h>
+#define MINIMIDI_MALLOC(ctx, size) malloc(size)
+#define MINIMIDI_FREE(ctx, ptr) free(ptr)
+#endif
+
+#ifndef MINIMIDI_ASSERT
+#include <assert.h>
+#define MINIMIDI_ASSERT assert
+#endif
+
 /* Naive ring buffer. The writer will not update the tail. The reader is expected to read in time */
 typedef struct MIDIMidiRingBuffer
 {
@@ -132,19 +149,19 @@ int minimidi_init(MiniMIDI* mm)
 
 MiniMIDI* minimidi_create()
 {
-    MiniMIDI* mm = (MiniMIDI*)calloc(1, sizeof(MiniMIDI));
+    MiniMIDI* mm = (MiniMIDI*)MINIMIDI_MALLOC(NULL, sizeof(MiniMIDI));
     minimidi_init(mm);
     return mm;
 }
 
 void minimidi_free(MiniMIDI* mm)
 {
-    assert(mm != NULL);
+    MINIMIDI_ASSERT(mm != NULL);
     minimidi_disconnect_port(mm);
     if (mm->clientName != NULL)
         CFRelease(mm->clientName);
 #ifndef MINIMIDI_USE_GLOBAL
-    free(mm);
+    MINIMIDI_FREE(NULL, mm);
 #endif
 }
 
@@ -227,8 +244,8 @@ int minimidi_connect_port(MiniMIDI* mm, unsigned int portNumber, const char* por
 {
     OSStatus        err = 0;
     MIDIEndpointRef sourceRef;
-    assert(mm->connectedPortName == NULL);
-    assert(mm->portRef == 0);
+    MINIMIDI_ASSERT(mm->connectedPortName == NULL);
+    MINIMIDI_ASSERT(mm->portRef == 0);
 
     /* TODO: try and create string here without allocating */
     mm->connectedPortName = CFStringCreateWithCString(NULL, portName, kCFStringEncodingASCII);
@@ -322,14 +339,19 @@ int minimidi_init(MiniMIDI* mm)
     return 0;
 }
 
-MiniMIDI* minimidi_create() { return (MiniMIDI*)calloc(1, sizeof(MiniMIDI)); }
+MiniMIDI* minimidi_create()
+{
+    MiniMIDI* mm = MINIMIDI_MALLOC(NULL, sizeof(MiniMIDI));
+    minimidi_init(mm);
+    return mm;
+}
 
 void minimidi_free(MiniMIDI* mm)
 {
     assert(mm != NULL);
     minimidi_disconnect_port(mm);
 #ifndef MINIMIDI_USE_GLOBAL
-    free(mm);
+    MINIMIDI_FREE(NULL, mm);
 #endif
 }
 
