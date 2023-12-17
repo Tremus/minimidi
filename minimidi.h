@@ -41,7 +41,6 @@ void minimidi_disconnect_port(MiniMIDI* mm);
 
 typedef struct MiniMIDIMessage
 {
-    /* Bytes pass */
     union
     {
         struct
@@ -68,9 +67,9 @@ unsigned minimidi_calc_num_bytes_from_status(unsigned char status_byte);
 #ifdef MINIMIDI_IMPL
 #undef MINIMIDI_IMPL
 
-#define ARRSIZE(arr)               (sizeof(arr) / sizeof(arr[0]))
+#define ARRSIZE(arr) (sizeof(arr) / sizeof(arr[0]))
 #define MINIMIDI_MIDI_BUFFER_COUNT 4
-#define MINIMIDI_MIDI_BUFFER_SIZE  1024
+#define MINIMIDI_MIDI_BUFFER_SIZE 1024
 
 /* Naive ring buffer. The writer will not update the tail. The reader is expected to read in time */
 typedef struct MIDIMidiRingBuffer
@@ -80,9 +79,6 @@ typedef struct MIDIMidiRingBuffer
 
     MiniMIDIMessage buffer[MINIMIDI_RINGBUFFER_SIZE];
 } MIDIMidiRingBuffer;
-
-int  minimidi_atomic_load_i32(const volatile int*);
-void minimidi_atomic_store_i32(volatile int*, int);
 
 unsigned minimidi_calc_num_bytes_from_status(unsigned char status_byte)
 {
@@ -301,10 +297,15 @@ struct MiniMIDI
 {
     HMIDIIN midiInHandle;
     int     connected;
+
+    MIDIMidiRingBuffer ringBuffer;
     /* Both LibreMidi and RtMidi use 4 headers.
        Can't hurt to copy them right? */
     MiniMIDIBuffer buffers[MINIMIDI_MIDI_BUFFER_COUNT];
 };
+
+int  minimidi_atomic_load_i32(volatile int* ptr) { return _InterlockedCompareExchange((volatile LONG*)ptr, 0, 0); }
+void minimidi_atomic_store_i32(volatile int* ptr, int v) { _InterlockedExchange((volatile LONG*)ptr, v); }
 
 int minimidi_init(MiniMIDI* mm)
 {
@@ -359,17 +360,23 @@ minimidi_MidiInProc(HMIDIIN hMidiIn, UINT wMsg, DWORD_PTR dwInstance, DWORD_PTR 
     /* https://learn.microsoft.com/en-gb/windows/win32/multimedia/mim-data?redirectedfrom=MSDN */
     if (wMsg == MIM_DATA)
     {
-        /* take first 3 bytes. remember, the rest are junk, including possibly the ones we're taking */
-        UINT bytes = midiMessage & 0xffffff;
-        /* TODO push midi bytes & timestamp to a ring buffer */
-    }
-    else if (wMsg == MIM_LONGDATA)
-    {
-        /* handle sysex*/
-        /* https://www.midi.org/specifications-old/item/table-4-universal-system-exclusive-messages */
-    }
+        MiniMIDIMessage msg;
+        int             writePos;
 
-    return;
+        /* take first 3 bytes. remember, the rest are junk, including possibly the ones we're taking */
+        msg.bytesAsInt  = midiMessage & 0xffffff;
+        msg.timestampMs = timeMs;
+
+        writePos = minimidi_atomic_load_i32(&mm->ringBuffer.writePos);
+
+        mm->ringBuffer.buffer[writePos] = msg;
+        writePos++;
+        writePos = writePos % ARRSIZE(mm->ringBuffer.buffer);
+        minimidi_atomic_store_i32(&mm->ringBuffer.writePos, writePos);
+    }
+    /* handle sysex*/
+    /* https://www.midi.org/specifications-old/item/table-4-universal-system-exclusive-messages */
+    /* else if (wMsg == MIM_LONGDATA) {} */
 }
 
 int minimidi_connect_port(MiniMIDI* mm, unsigned int portNumber, const char* portName)
