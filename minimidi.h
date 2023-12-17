@@ -13,6 +13,10 @@ extern "C" {
 #ifndef MINIMIDI_H
 #define MINIMIDI_H
 
+#ifndef MINIMIDI_RINGBUFFER_SIZE
+#define MINIMIDI_RINGBUFFER_SIZE 128
+#endif
+
 #include <stddef.h>
 
 typedef struct MiniMIDI MiniMIDI;
@@ -35,12 +39,6 @@ int minimidi_get_port_name(MiniMIDI* mm, unsigned int portNumber, char* nameBuff
 int  minimidi_connect_port(MiniMIDI* mm, unsigned int portNumber, const char* portName);
 void minimidi_disconnect_port(MiniMIDI* mm);
 
-/*
-    TODO:
-    - get midi message from queue
-    - push midi message to queue
-*/
-
 typedef struct MiniMIDIMessage
 {
     /* Bytes pass */
@@ -59,6 +57,9 @@ typedef struct MiniMIDIMessage
     unsigned int timestampMs;
 } MiniMIDIMessage;
 
+/* If there are no new messages, the returned message will be all blank (zeros) */
+MiniMIDIMessage minimidi_read_message(MiniMIDI* mm);
+
 unsigned minimidi_calc_num_bytes_from_status(unsigned char status_byte);
 
 #endif /* MINIMIDI_H */
@@ -70,6 +71,18 @@ unsigned minimidi_calc_num_bytes_from_status(unsigned char status_byte);
 #define ARRSIZE(arr)               (sizeof(arr) / sizeof(arr[0]))
 #define MINIMIDI_MIDI_BUFFER_COUNT 4
 #define MINIMIDI_MIDI_BUFFER_SIZE  1024
+
+/* Naive ring buffer. The writer will not update the tail. The reader is expected to read in time */
+typedef struct MIDIMidiRingBuffer
+{
+    volatile int writePos;
+    volatile int readPos;
+
+    MiniMIDIMessage buffer[MINIMIDI_RINGBUFFER_SIZE];
+} MIDIMidiRingBuffer;
+
+int  minimidi_atomic_load_i32(const volatile int*);
+void minimidi_atomic_store_i32(volatile int*, int);
 
 unsigned minimidi_calc_num_bytes_from_status(unsigned char status_byte)
 {
@@ -102,7 +115,12 @@ struct MiniMIDI
     MIDIPortRef portRef;
     UInt64      connectionStartNanos;
     CFStringRef connectedPortName;
+
+    MIDIMidiRingBuffer ringBuffer;
 };
+
+int  minimidi_atomic_load_i32(const volatile int* ptr) { return __atomic_load_n(ptr, __ATOMIC_SEQ_CST); }
+void minimidi_atomic_store_i32(volatile int* ptr, int v) { __atomic_store_n(ptr, v, __ATOMIC_SEQ_CST); }
 
 int minimidi_init(MiniMIDI* mm)
 {
@@ -162,8 +180,9 @@ int minimidi_get_port_name(MiniMIDI* mm, unsigned int portNum, char* nameBuf, si
 
 static void minimidi_readProc(const MIDIPacketList* pktlist, void* readProcRefCon, void* srcConnRefCon)
 {
-    MiniMIDI*         mm     = (MiniMIDI*)readProcRefCon;
-    const MIDIPacket* packet = &pktlist->packet[0];
+    MiniMIDI*         mm       = (MiniMIDI*)readProcRefCon;
+    const MIDIPacket* packet   = &pktlist->packet[0];
+    int               writePos = minimidi_atomic_load_i32(&mm->ringBuffer.writePos);
     int               i;
 
     for (i = 0; i < pktlist->numPackets; ++i)
@@ -180,11 +199,13 @@ static void minimidi_readProc(const MIDIPacketList* pktlist, void* readProcRefCo
         const Byte* bytes          = &packet->data[0];
         unsigned    remainingBytes = packet->length;
 
-        printf("Packet - num bytes: %u\n", remainingBytes);
-
         while (remainingBytes != 0)
         {
             message.status = *bytes;
+
+            /* Skip SYSEX */
+            if ((message.status & 0xf0) == 0xf0)
+                break;
 
             unsigned numMsgBytes = minimidi_calc_num_bytes_from_status(message.status);
 
@@ -193,9 +214,10 @@ static void minimidi_readProc(const MIDIPacketList* pktlist, void* readProcRefCo
             if (numMsgBytes == 3)
                 message.data2 = bytes[2];
 
-            /* TODO: push to ring buffer */
-
-            printf("Message - ts: %u, num bytes: %u\n", message.timestampMs, numMsgBytes);
+            mm->ringBuffer.buffer[writePos] = message;
+            writePos++;
+            writePos = writePos % ARRSIZE(mm->ringBuffer.buffer);
+            minimidi_atomic_store_i32(&mm->ringBuffer.writePos, writePos);
 
             bytes          += numMsgBytes;
             remainingBytes -= numMsgBytes;
@@ -410,6 +432,26 @@ void minimidi_disconnect_port(MiniMIDI* mm)
 }
 
 #endif /* _WIN32 */
+
+MiniMIDIMessage minimidi_read_message(MiniMIDI* mm)
+{
+    MiniMIDIMessage msg;
+    int             writePos, readPos;
+
+    msg.bytesAsInt  = 0;
+    msg.timestampMs = 0;
+    writePos        = minimidi_atomic_load_i32(&mm->ringBuffer.writePos);
+    readPos         = minimidi_atomic_load_i32(&mm->ringBuffer.readPos);
+
+    if (readPos != writePos)
+    {
+        msg = mm->ringBuffer.buffer[readPos];
+        readPos++;
+        readPos = readPos % ARRSIZE(mm->ringBuffer.buffer);
+        minimidi_atomic_store_i32(&mm->ringBuffer.readPos, readPos);
+    };
+    return msg;
+}
 
 #ifdef MINIMIDI_USE_GLOBAL
 static MiniMIDI g_minimidi;
