@@ -17,7 +17,7 @@ extern "C" {
 
 typedef struct MiniMIDI MiniMIDI;
 
-void      minimidi_init(MiniMIDI* mm);
+int       minimidi_init(MiniMIDI* mm);
 MiniMIDI* minimidi_create();
 void      minimidi_free(MiniMIDI* mm);
 #ifdef MINIMIDI_USE_GLOBAL
@@ -37,20 +37,41 @@ void minimidi_disconnect_port(MiniMIDI* mm);
 
 /*
     TODO:
-    - get midi message from tueue
+    - get midi message from queue
     - push midi message to queue
 */
 
+typedef struct MiniMIDIMessage
+{
+    /* Bytes pass */
+    union
+    {
+        struct
+        {
+            unsigned char status;
+            unsigned char data1;
+            unsigned char data2;
+        };
+        unsigned char bytes[4];
+        unsigned int  bytesAsInt;
+    };
+    /* Milliseconds since first connected to MIDI port */
+    unsigned int timestampMs;
+} MiniMIDIMessage;
+
+unsigned minimidi_calc_num_bytes_from_status(unsigned char status_byte);
+
 #endif /* MINIMIDI_H */
 
+#define MINIMIDI_IMPL
 #ifdef MINIMIDI_IMPL
 #undef MINIMIDI_IMPL
 
-#define ARRSIZE(arr) (sizeof(arr) / sizeof(arr[0]))
+#define ARRSIZE(arr)               (sizeof(arr) / sizeof(arr[0]))
 #define MINIMIDI_MIDI_BUFFER_COUNT 4
-#define MINIMIDI_MIDI_BUFFER_SIZE 1024
+#define MINIMIDI_MIDI_BUFFER_SIZE  1024
 
-static unsigned minimidi_calc_bytes_from_status(unsigned char status_byte)
+unsigned minimidi_calc_num_bytes_from_status(unsigned char status_byte)
 {
     /* https://www.midi.org/specifications-old/item/table-2-expanded-messages-list-status-bytes  */
     /* https://www.midi.org/specifications-old/item/table-3-control-change-messages-data-bytes-2 */
@@ -70,6 +91,7 @@ static unsigned minimidi_calc_bytes_from_status(unsigned char status_byte)
 }
 
 #ifdef __APPLE__
+#include <CoreAudio/CoreAudio.h>
 #include <CoreMIDI/CoreMIDI.h>
 
 struct MiniMIDI
@@ -77,8 +99,9 @@ struct MiniMIDI
     CFStringRef   clientName;
     MIDIClientRef clientRef;
 
-    CFStringRef connectedPortName;
     MIDIPortRef portRef;
+    UInt64      connectionStartNanos;
+    CFStringRef connectedPortName;
 };
 
 int minimidi_init(MiniMIDI* mm)
@@ -90,7 +113,7 @@ int minimidi_init(MiniMIDI* mm)
     mm->clientName = CFStringCreateWithCString(NULL, "MiniMIDI Input Client", kCFStringEncodingASCII);
     error          = MIDIClientCreate(mm->clientName, NULL, NULL, &mm->clientRef);
 
-    return ptr;
+    return error;
 }
 
 MiniMIDI* minimidi_create()
@@ -139,12 +162,45 @@ int minimidi_get_port_name(MiniMIDI* mm, unsigned int portNum, char* nameBuf, si
 
 static void minimidi_readProc(const MIDIPacketList* pktlist, void* readProcRefCon, void* srcConnRefCon)
 {
-    MiniMIDI* mm = (MiniMIDI*)readProcRefCon;
-
+    MiniMIDI*         mm     = (MiniMIDI*)readProcRefCon;
     const MIDIPacket* packet = &pktlist->packet[0];
-    for (unsigned int i = 0; i < pktlist->numPackets; ++i)
+    int               i;
+
+    for (i = 0; i < pktlist->numPackets; ++i)
     {
-        printf("Packet - ts: %llu, num bytes: %hu\n", packet->timeStamp, packet->length);
+        MiniMIDIMessage message;
+        /* MacOS timestamps come in their own ill defined format.
+           Here we convert it to num milliseconds since the beginning of the connection.
+           This matches the timestamp format Windows Multimedia sends in their MIDI read callbacks */
+        message.timestampMs = (AudioConvertHostTimeToNanos(packet->timeStamp) - mm->connectionStartNanos) / 1e6;
+
+        /* MacOS can send several MIDI messages within the same packet.
+           Here we push each MIDI message to our ring buffer, ignoring the SYSEX packets */
+
+        const Byte* bytes          = &packet->data[0];
+        unsigned    remainingBytes = packet->length;
+
+        printf("Packet - num bytes: %u\n", remainingBytes);
+
+        while (remainingBytes != 0)
+        {
+            message.status = *bytes;
+
+            unsigned numMsgBytes = minimidi_calc_num_bytes_from_status(message.status);
+
+            if (numMsgBytes != 1)
+                message.data1 = bytes[1];
+            if (numMsgBytes == 3)
+                message.data2 = bytes[2];
+
+            /* TODO: push to ring buffer */
+
+            printf("Message - ts: %u, num bytes: %u\n", message.timestampMs, numMsgBytes);
+
+            bytes          += numMsgBytes;
+            remainingBytes -= numMsgBytes;
+        }
+
         packet = MIDIPacketNext(packet);
     }
 }
@@ -169,6 +225,9 @@ int minimidi_connect_port(MiniMIDI* mm, unsigned int portNumber, const char* por
         goto failed;
 
     err = MIDIPortConnectSource(mm->portRef, sourceRef, NULL);
+
+    /* mm->connectionStartNanos = AudioConvertHostTimeToNanos(mach_absolute_time()) */
+    mm->connectionStartNanos = AudioConvertHostTimeToNanos(AudioGetCurrentHostTime());
     if (err != noErr)
         goto failed;
 
@@ -225,7 +284,7 @@ struct MiniMIDI
     MiniMIDIBuffer buffers[MINIMIDI_MIDI_BUFFER_COUNT];
 };
 
-void minimidi_init(MiniMIDI* mm)
+int minimidi_init(MiniMIDI* mm)
 {
     int i;
     memset(mm, 0, sizeof(*mm));
@@ -237,6 +296,7 @@ void minimidi_init(MiniMIDI* mm)
         head->dwBufferLength = ARRSIZE(mm->buffers[i].buffer);
         head->dwUser         = i;
     }
+    return 0;
 }
 
 MiniMIDI* minimidi_create() { return (MiniMIDI*)calloc(1, sizeof(MiniMIDI)); }
@@ -264,7 +324,8 @@ int minimidi_get_port_name(MiniMIDI* mm, unsigned int portNumber, char* nameBuff
     return result;
 }
 
-/* wMsg: message type
+/*
+ * wMsg: message type
  * midiMessage: midi status byte followed by up to 2 data bytes. The remaining bytes are junk.
  * timeMs: represents the time in milliseconds since the port connected
  */
@@ -277,7 +338,7 @@ minimidi_MidiInProc(HMIDIIN hMidiIn, UINT wMsg, DWORD_PTR dwInstance, DWORD_PTR 
     if (wMsg == MIM_DATA)
     {
         /* take first 3 bytes. remember, the rest are junk, including possibly the ones we're taking */
-        UINT  bytes = midiMessage & 0xffffff;
+        UINT bytes = midiMessage & 0xffffff;
         /* TODO push midi bytes & timestamp to a ring buffer */
     }
     else if (wMsg == MIM_LONGDATA)
