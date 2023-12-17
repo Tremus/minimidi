@@ -292,16 +292,23 @@ void minimidi_disconnect_port(MiniMIDI* mm)
 
 #ifdef _WIN32
 #pragma comment(lib, "winmm.lib")
+#pragma comment(lib, "cfgmgr32.lib")
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
 
+#include <cfgmgr32.h>
 #include <mmeapi.h>
 
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#ifndef DRV_QUERYDEVICEINTERFACE
+#define DRV_QUERYDEVICEINTERFACE 0x080c
+#define DRV_QUERYDEVICEINTERFACESIZE 0x080d
+#endif
 
 typedef struct MiniMIDIBuffer
 {
@@ -311,8 +318,11 @@ typedef struct MiniMIDIBuffer
 
 struct MiniMIDI
 {
-    HMIDIIN midiInHandle;
-    int     connected;
+    HMIDIIN         midiInHandle;
+    HCMNOTIFICATION notifyContext;
+    size_t          interfaceNameLength;
+    WCHAR           interfaceName[512];
+    int             connected;
 
     MIDIMidiRingBuffer ringBuffer;
     /* Both LibreMidi and RtMidi use 4 headers.
@@ -370,23 +380,23 @@ int minimidi_get_port_name(MiniMIDI* mm, unsigned int portNumber, char* nameBuff
 
 /*
  * wMsg: message type
- * midiMessage: midi status byte followed by up to 2 data bytes. The remaining bytes are junk.
- * timeMs: represents the time in milliseconds since the port connected
+ * dwParam1: midi status byte followed by up to 2 data bytes. The remaining bytes are junk.
+ * dwParam2: represents the time in milliseconds since the port connected
  */
 void CALLBACK
-minimidi_MidiInProc(HMIDIIN hMidiIn, UINT wMsg, DWORD_PTR dwInstance, DWORD_PTR midiMessage, DWORD_PTR timeMs)
+minimidi_MidiInProc(HMIDIIN hMidiIn, UINT wMsg, DWORD_PTR dwInstance, DWORD_PTR dwParam1, DWORD_PTR dwParam2)
 {
     MiniMIDI* mm = (MiniMIDI*)dwInstance;
 
     /* https://learn.microsoft.com/en-gb/windows/win32/multimedia/mim-data?redirectedfrom=MSDN */
-    if (wMsg == MIM_DATA)
+    if (wMsg == MM_MIM_DATA)
     {
         MiniMIDIMessage msg;
         int             writePos;
 
         /* take first 3 bytes. remember, the rest are junk, including possibly the ones we're taking */
-        msg.bytesAsInt  = midiMessage & 0xffffff;
-        msg.timestampMs = timeMs;
+        msg.bytesAsInt  = dwParam1 & 0xffffff;
+        msg.timestampMs = dwParam2;
 
         writePos = minimidi_atomic_load_i32(&mm->ringBuffer.writePos);
 
@@ -400,6 +410,22 @@ minimidi_MidiInProc(HMIDIIN hMidiIn, UINT wMsg, DWORD_PTR dwInstance, DWORD_PTR 
     /* else if (wMsg == MIM_LONGDATA) {} */
 }
 
+DWORD CALLBACK minimidi_CM_NOTIFY_CALLBACK(
+    _In_ HCMNOTIFICATION                                  hNotify,
+    _In_opt_ PVOID                                        Context,
+    _In_ CM_NOTIFY_ACTION                                 Action,
+    _In_reads_bytes_(EventDataSize) PCM_NOTIFY_EVENT_DATA EventData,
+    _In_ DWORD                                            EventDataSize)
+{
+    if (Action == CM_NOTIFY_ACTION_DEVICEINSTANCEREMOVED &&
+        EventData->FilterType == CM_NOTIFY_FILTER_TYPE_DEVICEINSTANCE)
+    {
+        printf("device event: %d\n", Action);
+        wprintf(L"%s\n", EventData->u.DeviceInstance.InstanceId);
+    }
+    return 0;
+}
+
 int minimidi_connect_port(MiniMIDI* mm, unsigned int portNumber, const char* portName)
 {
     MMRESULT result;
@@ -408,6 +434,34 @@ int minimidi_connect_port(MiniMIDI* mm, unsigned int portNumber, const char* por
         midiInOpen(&mm->midiInHandle, portNumber, (DWORD_PTR)&minimidi_MidiInProc, (DWORD_PTR)mm, CALLBACK_FUNCTION);
     if (result != MMSYSERR_NOERROR)
         goto failed;
+
+    /* https://learn.microsoft.com/en-us/windows-hardware/drivers/audio/drv-querydeviceinterface */
+    result = midiInMessage((HMIDIIN*)portNumber, DRV_QUERYDEVICEINTERFACESIZE, (DWORD_PTR)&mm->interfaceNameLength, 0);
+    if (result != MMSYSERR_NOERROR || mm->interfaceNameLength > sizeof(mm->interfaceName))
+        goto failed;
+
+    result = midiInMessage(
+        (HMIDIIN*)portNumber,
+        DRV_QUERYDEVICEINTERFACE,
+        (DWORD_PTR)mm->interfaceName,
+        sizeof(mm->interfaceName));
+    if (result != MMSYSERR_NOERROR)
+        goto failed;
+
+    wprintf(L"device name: %s, len: %llu\n", mm->interfaceName, mm->interfaceNameLength);
+
+    CM_NOTIFY_FILTER notifyFilter;
+    memset(&notifyFilter, 0, sizeof(notifyFilter));
+    notifyFilter.cbSize     = sizeof(notifyFilter);
+    notifyFilter.Flags      = CM_NOTIFY_FILTER_FLAG_ALL_DEVICE_INSTANCES;
+    notifyFilter.FilterType = CM_NOTIFY_FILTER_TYPE_DEVICEINSTANCE;
+
+    result = CM_Register_Notification(&notifyFilter, mm, minimidi_CM_NOTIFY_CALLBACK, &mm->notifyContext);
+    if (result != CR_SUCCESS)
+    {
+        printf("Failed CM_Register_Notification\n");
+        goto failed;
+    }
 
     for (i = 0; i < ARRSIZE(mm->buffers); i++)
     {
@@ -436,8 +490,10 @@ failed:
     }
     return result;
 }
+
 void minimidi_disconnect_port(MiniMIDI* mm)
 {
+    CM_Unregister_Notification(mm->notifyContext);
     if (mm->connected)
     {
         MMRESULT result;
