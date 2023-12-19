@@ -19,11 +19,11 @@ static void finish(int ignore) { done = 1; }
 
 int main()
 {
-    struct MiniMIDI* mm;
-    unsigned int     numPorts;
-    int              portNameLen;
-    char             portName[128];
-    int              err;
+    MiniMIDI*    mm;
+    unsigned int numPorts;
+    int          portNameLen;
+    char         portName[128];
+    int          err;
 
     mm = minimidi_get_global();
     minimidi_init(mm);

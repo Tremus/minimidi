@@ -195,10 +195,19 @@ static void minimidi_readProc(const MIDIPacketList* pktlist, void* readProcRefCo
     MiniMIDI*         mm       = (MiniMIDI*)readProcRefCon;
     const MIDIPacket* packet   = &pktlist->packet[0];
     int               writePos = minimidi_atomic_load_i32(&mm->ringBuffer.writePos);
-    int               i;
+    unsigned int      i;
 
     for (i = 0; i < pktlist->numPackets; ++i)
     {
+        /* Either MacOS, or the cheap hardware I used while testing this, appears to send junk data if the device is
+           unplugged then plugged back in. Behind the scenes, MacOS will simply reconnect you, then sends you the data.
+           If this assumption is correct, then some sneaky data will lead with a valid status byte and get through...
+           Here we cautiously exit the proc */
+        if (packet->length == 0)
+            return;
+        if (*packet->data < 0x80)
+            return;
+
         MiniMIDIMessage message;
         /* MacOS timestamps come in their own ill defined format.
            Here we convert it to num milliseconds since the beginning of the connection.
@@ -216,8 +225,8 @@ static void minimidi_readProc(const MIDIPacketList* pktlist, void* readProcRefCo
             message.status = *bytes;
 
             /* Skip SYSEX */
-            if ((message.status & 0xf0) == 0xf0)
-                break;
+            if (message.status == 0xf0)
+                return;
 
             unsigned numMsgBytes = minimidi_calc_num_bytes_from_status(message.status);
 
