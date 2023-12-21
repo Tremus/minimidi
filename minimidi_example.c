@@ -9,9 +9,11 @@
 
 #ifdef _WIN32
 #define SLEEP(ms) Sleep(ms)
+#define print(str, ...) (printf(str, __VA_ARGS__), fflush(stdout))
 #else
 #include <unistd.h>
 #define SLEEP(ms) usleep(ms * 1000)
+#define print printf
 #endif
 
 int         done = 0;
@@ -31,19 +33,19 @@ int main()
     numPorts = minimidi_get_num_ports(mm);
     if (numPorts == 0)
     {
-        printf("No ports available!\n");
+        print("No ports available!\n");
         return 1;
     }
     err = minimidi_get_port_name(mm, 0, portName, sizeof(portName));
     if (err != 0)
     {
-        printf("Failed getting name!\n");
+        print("Failed getting name!\n");
         return 1;
     }
     err = minimidi_connect_port(mm, 0, "MiniMIDI example");
     if (err != 0)
     {
-        printf("Failed connecting to port 0!\n");
+        print("Failed connecting to port 0!\n");
         return 1;
     }
 
@@ -51,7 +53,7 @@ int main()
        A neat trick found in qmidiin.c */
     (void)signal(SIGINT, finish);
 
-    printf("Reading MIDI from port %s. Quit with Ctrl-C.\n", portName);
+    print("Reading MIDI from port %s. Quit with Ctrl-C.\n", portName);
     while (done == 0)
     {
         MiniMIDIMessage msg;
@@ -66,18 +68,43 @@ int main()
                     unsigned channel  = msg.status & 0x0f;
                     unsigned note     = msg.data1;
                     unsigned velocity = msg.data2;
-                    printf("note off... channel: %u, note: %u, velocity: %u\n", channel, note, velocity);
+                    print("note off... channel: %u, note: %u, velocity: %u\n", channel, note, velocity);
                 }
                 else if ((msg.status & 0xf0) == 0x90)
                 {
                     unsigned channel  = msg.status & 0x0f;
                     unsigned note     = msg.data1;
                     unsigned velocity = msg.data2;
-                    printf("note on! channel: %u, note: %u, velocity: %u\n", channel, note, velocity);
+                    print("note on! channel: %u, note: %u, velocity: %u\n", channel, note, velocity);
                 }
             }
         }
         while (msg.timestampMs != 0 && done != 0);
+
+#ifdef _WIN32
+        /* Hotplugging for windows. On MacOS it's automatic... */
+        if (minimidi_should_reconnect(mm))
+        {
+            static const int HOTPLUG_TIMEOUT        = (1000 * 60 * 2); /* 2min */
+            static const int HOTPLUG_SLEEP_INTERVAL = 100;             /* 100ms */
+            int              msCounter              = 0;
+
+            print("WARNING: Unknown device disconnected!\n");
+            print("If this was your MIDI device, please plug it back in. This program will automatically reconnect.\n");
+
+            while (msCounter < HOTPLUG_TIMEOUT)
+            {
+                if (minimidi_try_reconnect(mm, "MiniMIDI example"))
+                {
+                    print("Successfully reconnected!\n");
+                    break;
+                }
+
+                SLEEP(HOTPLUG_SLEEP_INTERVAL);
+                msCounter += HOTPLUG_SLEEP_INTERVAL;
+            }
+        }
+#endif
 
         SLEEP(10);
     }

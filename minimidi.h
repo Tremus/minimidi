@@ -1,4 +1,4 @@
-/* MINIMIDI
+/* MINIMIDI by Tré Dudman
  * STB style header library.
  * Only handles MIDI input on Windows & MacOS, skipping SYSEX messages.
  *
@@ -43,6 +43,19 @@ int minimidi_get_port_name(MiniMIDI* mm, unsigned int portNumber, char* nameBuff
    Returns 0 on success */
 int  minimidi_connect_port(MiniMIDI* mm, unsigned int portNumber, const char* portName);
 void minimidi_disconnect_port(MiniMIDI* mm);
+
+#ifdef _WIN32
+/* Windows aren't very helpful in telling you when your device is disconnected
+   They can tell you when a device disconnected and give you its name, but the name is not guaranteed to be unique.
+   What we've chosen to do to is set an internal flag when ANY device is disconnected.
+   This function returns the result of the flag */
+int minimidi_should_reconnect(MiniMIDI* mm);
+/* Scans through available ports looking the port number of the last connected device.
+   If found, it will connect to that port and return 1. Returns 0 in all other cases.
+   This isn't a catch all solution, it just suits most cases.
+   If you know a more relaiable solution, please contact me @ https://github.com/Tremus/minimidi */
+int minimidi_try_reconnect(MiniMIDI* mm, const char* portName);
+#endif
 
 typedef struct MiniMIDIMessage
 {
@@ -329,9 +342,12 @@ struct MiniMIDI
 {
     HMIDIIN         midiInHandle;
     HCMNOTIFICATION notifyContext;
-    size_t          interfaceNameLength;
-    WCHAR           interfaceName[512];
-    int             connected;
+
+    int lastConnectedPortNum;
+    /* set to 1 whenever a device is removed */
+    volatile LONG shouldReconnect;
+
+    int connected;
 
     MIDIMidiRingBuffer ringBuffer;
     /* Both LibreMidi and RtMidi use 4 headers.
@@ -429,37 +445,26 @@ DWORD CALLBACK minimidi_CM_NOTIFY_CALLBACK(
     if (Action == CM_NOTIFY_ACTION_DEVICEINSTANCEREMOVED &&
         EventData->FilterType == CM_NOTIFY_FILTER_TYPE_DEVICEINSTANCE)
     {
-        printf("device event: %d\n", Action);
-        wprintf(L"%s\n", EventData->u.DeviceInstance.InstanceId);
+        MiniMIDI* mm = Context;
+
+        if (Action == CM_NOTIFY_ACTION_DEVICEINSTANCEREMOVED)
+            minimidi_atomic_store_i32((volatile int*)&mm->shouldReconnect, 1);
     }
     return 0;
 }
 
 int minimidi_connect_port(MiniMIDI* mm, unsigned int portNumber, const char* portName)
 {
-    MMRESULT result;
-    int      i;
+    MMRESULT         result;
+    int              i;
+    CM_NOTIFY_FILTER notifyFilter;
+
     result =
         midiInOpen(&mm->midiInHandle, portNumber, (DWORD_PTR)&minimidi_MidiInProc, (DWORD_PTR)mm, CALLBACK_FUNCTION);
+
     if (result != MMSYSERR_NOERROR)
         goto failed;
 
-    /* https://learn.microsoft.com/en-us/windows-hardware/drivers/audio/drv-querydeviceinterface */
-    result = midiInMessage((HMIDIIN*)portNumber, DRV_QUERYDEVICEINTERFACESIZE, (DWORD_PTR)&mm->interfaceNameLength, 0);
-    if (result != MMSYSERR_NOERROR || mm->interfaceNameLength > sizeof(mm->interfaceName))
-        goto failed;
-
-    result = midiInMessage(
-        (HMIDIIN*)portNumber,
-        DRV_QUERYDEVICEINTERFACE,
-        (DWORD_PTR)mm->interfaceName,
-        sizeof(mm->interfaceName));
-    if (result != MMSYSERR_NOERROR)
-        goto failed;
-
-    wprintf(L"device name: %s, len: %llu\n", mm->interfaceName, mm->interfaceNameLength);
-
-    CM_NOTIFY_FILTER notifyFilter;
     memset(&notifyFilter, 0, sizeof(notifyFilter));
     notifyFilter.cbSize     = sizeof(notifyFilter);
     notifyFilter.Flags      = CM_NOTIFY_FILTER_FLAG_ALL_DEVICE_INSTANCES;
@@ -467,18 +472,14 @@ int minimidi_connect_port(MiniMIDI* mm, unsigned int portNumber, const char* por
 
     result = CM_Register_Notification(&notifyFilter, mm, minimidi_CM_NOTIFY_CALLBACK, &mm->notifyContext);
     if (result != CR_SUCCESS)
-    {
-        printf("Failed CM_Register_Notification\n");
         goto failed;
-    }
 
     for (i = 0; i < ARRSIZE(mm->buffers); i++)
     {
-        MIDIHDR* head = &mm->buffers[i].header;
-        result        = midiInPrepareHeader(mm->midiInHandle, head, sizeof(*head));
+        result = midiInPrepareHeader(mm->midiInHandle, &mm->buffers[i].header, sizeof(mm->buffers[i].header));
         if (result != MMSYSERR_NOERROR)
             goto failed;
-        result = midiInAddBuffer(mm->midiInHandle, head, sizeof(MIDIHDR));
+        result = midiInAddBuffer(mm->midiInHandle, &mm->buffers[i].header, sizeof(MIDIHDR));
         if (result != MMSYSERR_NOERROR)
             goto failed;
     }
@@ -487,7 +488,8 @@ int minimidi_connect_port(MiniMIDI* mm, unsigned int portNumber, const char* por
     if (result != MMSYSERR_NOERROR)
         goto failed;
 
-    mm->connected = 1;
+    mm->connected            = 1;
+    mm->lastConnectedPortNum = portNumber;
 
     return result;
 
@@ -522,6 +524,24 @@ void minimidi_disconnect_port(MiniMIDI* mm)
         mm->midiInHandle = 0;
         mm->connected    = 0;
     }
+}
+
+int minimidi_should_reconnect(MiniMIDI* mm) { return _InterlockedCompareExchange(&mm->shouldReconnect, 0, 1); }
+
+int minimidi_try_reconnect(MiniMIDI* mm, const char* portName)
+{
+    int i;
+    int numPorts = minimidi_get_num_ports(mm);
+    for (i = 0; i < numPorts; i++)
+    {
+        if (i == mm->lastConnectedPortNum)
+        {
+            minimidi_disconnect_port(mm);
+            return minimidi_connect_port(mm, i, portName) == 0;
+        }
+    }
+
+    return 0;
 }
 
 #endif /* _WIN32 */
