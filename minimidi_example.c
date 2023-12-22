@@ -16,14 +16,17 @@
 #define print printf
 #endif
 
-int         done = 0;
-static void finish(int ignore) { done = 1; }
+int         shouldExit = 0;
+static void quit(int ignore)
+{
+    print("Shutting down\n");
+    shouldExit = 1;
+}
 
 int main()
 {
     MiniMIDI*    mm;
     unsigned int numPorts;
-    int          portNameLen;
     char         portName[128];
     int          err;
 
@@ -51,10 +54,10 @@ int main()
 
     /* Set up callback for user hitting Ctrl-C
        A neat trick found in qmidiin.c */
-    (void)signal(SIGINT, finish);
+    (void)signal(SIGINT, quit);
 
     print("Reading MIDI from port %s. Quit with Ctrl-C.\n", portName);
-    while (done == 0)
+    while (shouldExit == 0)
     {
         MiniMIDIMessage msg;
         do
@@ -79,7 +82,7 @@ int main()
                 }
             }
         }
-        while (msg.timestampMs != 0 && done != 0);
+        while (msg.timestampMs != 0 && shouldExit != 0);
 
 #ifdef _WIN32
         /* Hotplugging for windows. On MacOS it's automatic... */
@@ -92,7 +95,7 @@ int main()
             print("WARNING: Unknown device disconnected!\n");
             print("If this was your MIDI device, please plug it back in. This program will automatically reconnect.\n");
 
-            while (msCounter < HOTPLUG_TIMEOUT)
+            while (msCounter < HOTPLUG_TIMEOUT && shouldExit == 0)
             {
                 if (minimidi_try_reconnect(mm, "MiniMIDI example"))
                 {
