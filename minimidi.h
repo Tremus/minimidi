@@ -101,13 +101,13 @@ unsigned minimidi_calc_num_bytes_from_status(unsigned char status_byte);
 #endif
 
 /* Naive ring buffer. The writer will not update the tail. The reader is expected to read in time */
-typedef struct MIDIMidiRingBuffer
+typedef struct MiniMIDIRingBuffer
 {
     volatile int writePos;
     volatile int readPos;
 
     MiniMIDIMessage buffer[MINIMIDI_RINGBUFFER_SIZE];
-} MIDIMidiRingBuffer;
+} MiniMIDIRingBuffer;
 
 unsigned minimidi_calc_num_bytes_from_status(unsigned char status_byte)
 {
@@ -141,7 +141,7 @@ struct MiniMIDI
     UInt64      connectionStartNanos;
     CFStringRef connectedPortName;
 
-    MIDIMidiRingBuffer ringBuffer;
+    MiniMIDIRingBuffer ringBuffer;
 };
 
 int  minimidi_atomic_load_i32(const volatile int* ptr) { return __atomic_load_n(ptr, __ATOMIC_SEQ_CST); }
@@ -349,7 +349,7 @@ struct MiniMIDI
 
     int connected;
 
-    MIDIMidiRingBuffer ringBuffer;
+    MiniMIDIRingBuffer ringBuffer;
     /* Both LibreMidi and RtMidi use 4 headers.
        Can't hurt to copy them right? */
     MiniMIDIBuffer buffers[MINIMIDI_MIDI_BUFFER_COUNT];
